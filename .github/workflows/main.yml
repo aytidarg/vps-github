@@ -14,21 +14,23 @@ on:
           - '3'
           - '5'
           - '8'
+          - '10'
 
 jobs:
-  # 1. Generate matrix array dinamis sesuai vps_count
+  # Job 1: Generate matrix array JSON berdasarkan input vps_count
   generate-nodes:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - id: set-matrix
+      - name: Generate Dynamic Node Array
+        id: set-matrix
         run: |
           COUNT=${{ github.event.inputs.vps_count }}
           JSON_ARRAY=$(seq 1 $COUNT | jq -R 'tonumber' | jq -s -c .)
           echo "matrix=$JSON_ARRAY" >> $GITHUB_OUTPUT
 
-  # 2. Spawn VPS paralel
+  # Job 2: Spawn node runner secara paralel
   secure-ssh:
     needs: generate-nodes
     runs-on: ubuntu-latest
@@ -49,6 +51,7 @@ jobs:
           chmod 600 /home/runner/.ssh/authorized_keys
           chown -R runner:runner /home/runner/.ssh
 
+          # Izinkan PubkeyAuthentication dan matikan PasswordAuthentication
           sudo sed -i 's/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
           echo "runner ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner-nopasswd
@@ -65,20 +68,22 @@ jobs:
         run: |
           NODE_NAME="gh-ssh-${GITHUB_RUN_ID}-${{ matrix.node }}"
           sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=${NODE_NAME}
-          
+
           TS_IP=$(tailscale ip -4)
           if [ -z "$TS_IP" ]; then
-            echo "Gagal mengambil IP Tailscale"
+            echo "ERROR: Gagal mendapatkan IP Tailscale!"
             exit 1
           fi
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
           echo "NODE_NAME=$NODE_NAME" >> $GITHUB_ENV
 
-      - name: Maintain Connection
+      - name: Maintain Keep-Alive Connection
         run: |
-          echo "================ NODE ${{ matrix.node }} READY ================"
+          echo "================================================="
+          echo "NODE ${{ matrix.node }} SIAP DIGUNAKAN"
           echo "Hostname   : $NODE_NAME"
           echo "Tailscale IP: $TAILSCALE_IP"
+          echo "User SSH   : runner"
           echo "================================================="
           while true; do
             echo "[$(date)] Node ${{ matrix.node }} ($TAILSCALE_IP) standby..."
