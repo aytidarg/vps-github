@@ -2,28 +2,58 @@ name: SSH_UBUNTU_TAILSCALE
 
 on:
   workflow_dispatch:
+    inputs:
+      vps_count:
+        description: 'Pilih berapa VPS yang mau dinyalakan:'
+        required: true
+        default: '3'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '5'
+          - '8'
 
 jobs:
-  secure-ssh:
+  # 1. Generate matrix array dinamis sesuai vps_count
+  generate-nodes:
     runs-on: ubuntu-latest
-    timeout-minutes: 3600
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          COUNT=${{ github.event.inputs.vps_count }}
+          JSON_ARRAY=$(seq 1 $COUNT | jq -R 'tonumber' | jq -s -c .)
+          echo "matrix=$JSON_ARRAY" >> $GITHUB_OUTPUT
+
+  # 2. Spawn VPS paralel
+  secure-ssh:
+    needs: generate-nodes
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJson(needs.generate-nodes.outputs.matrix) }}
 
     steps:
-      - name: Setup SSH & User Password
+      - name: Setup SSH Public Key
+        env:
+          SSH_PUBKEY: ${{ secrets.SSH_PUBKEY }}
         run: |
-          # Generate password acak 16 karakter
-          PASSWORD=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
-          
-          # Set password untuk user bawaan runner ('runner') dan pastikan akses sudo
-          echo "runner:$PASSWORD" | sudo chpasswd
-          
-          # Pastikan SSH server aktif dan izinkan autentikasi password
-          sudo sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^#*KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+          mkdir -p /home/runner/.ssh
+          chmod 700 /home/runner/.ssh
+          echo "$SSH_PUBKEY" >> /home/runner/.ssh/authorized_keys
+          chmod 600 /home/runner/.ssh/authorized_keys
+          chown -R runner:runner /home/runner/.ssh
+
+          sudo sed -i 's/^#*PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+          echo "runner ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner-nopasswd
           sudo systemctl restart ssh
-          
           echo "SSH_USER=runner" >> $GITHUB_ENV
-          echo "SSH_PASS=$PASSWORD" >> $GITHUB_ENV
 
       - name: Install Tailscale
         run: |
@@ -33,40 +63,24 @@ jobs:
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=gh-ssh-${GITHUB_RUN_ID}
+          NODE_NAME="gh-ssh-${GITHUB_RUN_ID}-${{ matrix.node }}"
+          sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=${NODE_NAME}
           
-          # Ambil IPv4 Tailscale
           TS_IP=$(tailscale ip -4)
           if [ -z "$TS_IP" ]; then
-            echo "Gagal mendapatkan IP Tailscale"
+            echo "Gagal mengambil IP Tailscale"
             exit 1
           fi
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: Verify SSH Accessibility
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          # Periksa apakah port SSH (22) terbuka
-          if nc -z -v -w5 127.0.0.1 22 2>/dev/null; then
-            echo "SSH daemon aktif pada port 22!"
-          else
-            echo "SSH daemon tidak merespons di port 22"
-            exit 1
-          fi
+          echo "NODE_NAME=$NODE_NAME" >> $GITHUB_ENV
 
       - name: Maintain Connection
         run: |
-          echo ""
-          echo "================ SSH ACCESS ================"
-          echo "Command : ssh $SSH_USER@$TAILSCALE_IP"
-          echo "Host IP : $TAILSCALE_IP"
-          echo "Username: $SSH_USER"
-          echo "Password: $SSH_PASS"
-          echo "============================================"
-          echo ""
-          
-          # Loop agar runner tetap aktif
+          echo "================ NODE ${{ matrix.node }} READY ================"
+          echo "Hostname   : $NODE_NAME"
+          echo "Tailscale IP: $TAILSCALE_IP"
+          echo "================================================="
           while true; do
-            echo "[$(date)] SSH Session Active - Batalkan workflow untuk mematikan."
+            echo "[$(date)] Node ${{ matrix.node }} ($TAILSCALE_IP) standby..."
             sleep 300
           done
