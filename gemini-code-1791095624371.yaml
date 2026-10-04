@@ -1,0 +1,72 @@
+name: SSH_UBUNTU_TAILSCALE
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Setup SSH & User Password
+        run: |
+          # Generate password acak 16 karakter
+          PASSWORD=$(tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16)
+          
+          # Set password untuk user bawaan runner ('runner') dan pastikan akses sudo
+          echo "runner:$PASSWORD" | sudo chpasswd
+          
+          # Pastikan SSH server aktif dan izinkan autentikasi password
+          sudo sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+          
+          echo "SSH_USER=runner" >> $GITHUB_ENV
+          echo "SSH_PASS=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Establish Tailscale Connection
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          sudo tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=gh-ssh-${GITHUB_RUN_ID}
+          
+          # Ambil IPv4 Tailscale
+          TS_IP=$(tailscale ip -4)
+          if [ -z "$TS_IP" ]; then
+            echo "Gagal mendapatkan IP Tailscale"
+            exit 1
+          fi
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Verify SSH Accessibility
+        run: |
+          echo "Tailscale IP: $TAILSCALE_IP"
+          # Periksa apakah port SSH (22) terbuka
+          if nc -z -v -w5 127.0.0.1 22 2>/dev/null; then
+            echo "SSH daemon aktif pada port 22!"
+          else
+            echo "SSH daemon tidak merespons di port 22"
+            exit 1
+          fi
+
+      - name: Maintain Connection
+        run: |
+          echo ""
+          echo "================ SSH ACCESS ================"
+          echo "Command : ssh $SSH_USER@$TAILSCALE_IP"
+          echo "Host IP : $TAILSCALE_IP"
+          echo "Username: $SSH_USER"
+          echo "Password: $SSH_PASS"
+          echo "============================================"
+          echo ""
+          
+          # Loop agar runner tetap aktif
+          while true; do
+            echo "[$(date)] SSH Session Active - Batalkan workflow untuk mematikan."
+            sleep 300
+          done
